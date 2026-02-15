@@ -141,32 +141,17 @@ class MyFirstKotlinPlugin : Plugin() {
         // Slash command to send a friend request using your account token.
         commands.registerCommand(
             "add-friend",
-            "Send a friend request (supports new global usernames or legacy Username#1234)",
+            "Send a friend request",
             listOf(
                 Utils.createCommandOption(
-                    ApplicationCommandType.STRING,
-                    "username",
-                    "Username (global or legacy with #)",
+                    ApplicationCommandType.USER,
+                    "user",
+                    "User to add as friend",
                 ),
             ),
         ) { ctx ->
-            val input = ctx.getStringOrDefault("username", "").trim()
-            if (input.isEmpty()) {
-                return@registerCommand CommandsAPI.CommandResult("Please provide a username")
-            }
-            val uname: String
-            val disc: String?
-            if (input.contains("#")) {
-                val parts = input.split("#")
-                if (parts.size != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
-                    return@registerCommand CommandsAPI.CommandResult("Invalid format. Use Username#1234")
-                }
-                uname = parts[0]
-                disc = parts[1]
-            } else {
-                uname = input
-                disc = null
-            }
+            val user = ctx.getRequiredUser("user")
+            val userId = user.id
 
             // Automatically fetch token from Aliucord/Discord internals
             val token = fetchToken()
@@ -177,39 +162,8 @@ class MyFirstKotlinPlugin : Plugin() {
             val client = OkHttpClient()
             val fingerprint = fetchFingerprint()
             val superProps = getSuperProperties()
-            val query = if (disc != null) "$uname#$disc" else uname
 
-            // Step 1: Search for user ID
-            val searchReq = Request.Builder()
-                .url("https://discord.com/api/v9/users/search?query=$query")
-                .get()
-                .addHeader("Authorization", token)
-                .addHeader("User-Agent", "Discord-Android/191019;RNA")
-                .addHeader("X-Super-Properties", superProps)
-                .addHeader("X-Discord-Locale", "en-US")
-                .addHeader("Accept", "application/json")
-                .apply { if (fingerprint != null) addHeader("X-Fingerprint", fingerprint) }
-                .build()
-
-            val userId = try {
-                client.newCall(searchReq).execute().use { res ->
-                    if (!res.isSuccessful) {
-                        return@registerCommand CommandsAPI.CommandResult("Failed to search user: ${res.code}")
-                    }
-                    val body = res.body?.string() ?: return@registerCommand CommandsAPI.CommandResult("Empty search response")
-                    val json = JSONArray(body)
-                    if (json.length() == 0) return@registerCommand CommandsAPI.CommandResult("User not found")
-                    val user = json.getJSONObject(0)
-                    user.getString("id")
-                }
-            } catch (e: Exception) {
-                return@registerCommand CommandsAPI.CommandResult("Error searching user: ${e.message}")
-            }
-
-            // Add delay to avoid rate limiting
-            Thread.sleep(1000)
-
-            // Step 2: Send friend request via PUT
+            // Send friend request via PUT
             val putReq = Request.Builder()
                 .url("https://discord.com/api/v9/users/@me/relationships/$userId")
                 .put(RequestBody.create(null, ""))
@@ -225,7 +179,7 @@ class MyFirstKotlinPlugin : Plugin() {
             try {
                 client.newCall(putReq).execute().use { res ->
                     if (res.isSuccessful) {
-                        CommandsAPI.CommandResult("Friend request sent to $input")
+                        CommandsAPI.CommandResult("Friend request sent to ${user.username}")
                     } else {
                         CommandsAPI.CommandResult("Failed: ${res.code} ${res.message}")
                     }
