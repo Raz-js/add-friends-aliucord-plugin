@@ -37,7 +37,7 @@ jobs:
           distribution: temurin
 
       - name: Clear Gradle Cache
-        run: rm -rf ~/.gradle/caches
+        run: rm -rf ~/.gradle
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v5
