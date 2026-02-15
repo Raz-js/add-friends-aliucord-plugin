@@ -14,6 +14,12 @@ import com.discord.stores.StoreUserTyping
 import com.discord.widgets.chat.list.adapter.WidgetChatListAdapterItemMessage
 import com.discord.widgets.chat.list.entries.ChatListEntry
 import com.discord.widgets.chat.list.entries.MessageEntry
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 
 // Aliucord Plugin annotation. Must be present on the main class of your plugin
 // Plugin class. Must extend Plugin and override start and stop
@@ -23,6 +29,74 @@ import com.discord.widgets.chat.list.entries.MessageEntry
 )
 @Suppress("unused")
 class MyFirstKotlinPlugin : Plugin() {
+    private fun fetchToken(): String? {
+        try {
+            // Try known Aliucord Utils static methods/fields
+            val utils = Utils::class.java
+            utils.methods.firstOrNull { it.name.equals("getToken", ignoreCase = true) && it.parameterCount == 0 && it.returnType == String::class.java }
+                ?.let { return (it.invoke(null) as? String) }
+
+            utils.methods.firstOrNull { it.parameterCount == 0 && it.returnType == String::class.java }
+                ?.let { val r = it.invoke(null) as? String; if (!r.isNullOrEmpty()) return r }
+
+            utils.declaredFields.firstOrNull { it.type == String::class.java && it.name.contains("token", ignoreCase = true) }
+                ?.let { it.isAccessible = true; val r = it.get(null) as? String; if (!r.isNullOrEmpty()) return r }
+        } catch (e: Exception) { }
+
+        // Fallback: try several likely Discord store classes and singletons
+        val candidates = arrayOf(
+            "com.discord.stores.LoginStore",
+            "com.discord.stores.OauthStore",
+            "com.discord.stores.AuthStore",
+            "com.discord.stores.AuthTokenStore",
+            "com.discord.stores.StoreOauth2"
+        )
+        for (c in candidates) {
+            try {
+                val cls = Class.forName(c)
+                cls.methods.firstOrNull { it.name.contains("getToken", true) && it.parameterCount == 0 }
+                    ?.let { val r = it.invoke(null) as? String; if (!r.isNullOrEmpty()) return r }
+
+                // try static instance field then call instance method
+                val instField = cls.declaredFields.firstOrNull { java.lang.reflect.Modifier.isStatic(it.modifiers) && it.type == cls }
+                if (instField != null) {
+                    instField.isAccessible = true
+                    val inst = instField.get(null)
+                    if (inst != null) {
+                        cls.methods.firstOrNull { it.name.contains("getToken", true) && it.parameterCount == 0 }
+                            ?.let { val r = it.invoke(inst) as? String; if (!r.isNullOrEmpty()) return r }
+                    }
+                }
+            } catch (_: Exception) { }
+        }
+
+        return null
+    }
+
+    private fun fetchFingerprint(): String? {
+        try {
+            // Try to get from StoreExperiments or similar
+            val storeExp = Class.forName("com.discord.stores.StoreExperiments")
+            val instField = storeExp.declaredFields.firstOrNull { java.lang.reflect.Modifier.isStatic(it.modifiers) && it.type == storeExp }
+            if (instField != null) {
+                instField.isAccessible = true
+                val inst = instField.get(null)
+                if (inst != null) {
+                    val fingerprintField = storeExp.declaredFields.firstOrNull { it.name.contains("fingerprint", true) }
+                    if (fingerprintField != null) {
+                        fingerprintField.isAccessible = true
+                        return fingerprintField.get(inst) as? String
+                    }
+                }
+            }
+        } catch (e: Exception) { }
+        return null
+    }
+
+    private fun getSuperProperties(): String {
+        // Updated base64 for recent Discord Android build
+        return "eyJvcyI6IkFuZHJvaWQiLCJicm93c2VyIjoiRGlzY29yZCBBbmRyb2lkIiwiZGV2aWNlIjoiU00tRzk3NUYiLCJzeXN0ZW1fbG9jYWxlIjoiZW4tVVMiLCJicm93c2VyX3VzZXJfYWdlbnQiOiJEYWx2aWsvMi4xLjAgKExpbnV4OyBVOyBBbmRyb2lkIDEwOyBTTT1HOTc1RiBCdWlsZC9RUDJBLjE5MDgxMS4wMjApIiwiYnJvd3Nlcl92ZXJzaW9uIjoiIiwib3NfdmVyc2lvbiI6IjMwIiwicmVmZXJyZXIiOiJodHRwczovL2Rpc2NvcmQuY29tL2NoYW5uZWxzL0BtZSIsInJlZmVycmluZ19kb21haW4iOiJkaXNjb3JkLmNvbSIsInJlZmVycmVyX2N1cnJlbnQiOiIiLCJyZWZlcnJpbmdfZG9tYWluX2N1cnJlbnQiOiIiLCJyZWxlYXNlX2NoYW5uZWwiOiJzdGFibGUiLCJjbGllbnRfYnVpbGRfbnVtYmVyIjoxMjYwMjEsImNsaWVudF9ldmVudF9zb3VyY2UiOm51bGx9"
+    }
     override fun start(context: Context) {
         // Register a command with the name hello and description "My first command!" and no arguments.
         // Learn more: https://github.com/Aliucord/documentation/blob/main/plugin-dev/2_commands.md
@@ -62,6 +136,103 @@ class MyFirstKotlinPlugin : Plugin() {
 
             // Return the final result that will be displayed in chat as a response to the command
             CommandsAPI.CommandResult("Hello $username!")
+        }
+
+        // Slash command to send a friend request using your account token.
+        commands.registerCommand(
+            "add-friend",
+            "Send a friend request (supports new global usernames or legacy Username#1234)",
+            listOf(
+                Utils.createCommandOption(
+                    ApplicationCommandType.STRING,
+                    "username",
+                    "Username (global or legacy with #)",
+                ),
+            ),
+        ) { ctx ->
+            val input = ctx.getStringOrDefault("username", "").trim()
+            if (input.isEmpty()) {
+                return@registerCommand CommandsAPI.CommandResult("Please provide a username")
+            }
+            val uname: String
+            val disc: String?
+            if (input.contains("#")) {
+                val parts = input.split("#")
+                if (parts.size != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
+                    return@registerCommand CommandsAPI.CommandResult("Invalid format. Use Username#1234")
+                }
+                uname = parts[0]
+                disc = parts[1]
+            } else {
+                uname = input
+                disc = null
+            }
+
+            // Automatically fetch token from Aliucord/Discord internals
+            val token = fetchToken()
+            if (token.isNullOrEmpty()) {
+                return@registerCommand CommandsAPI.CommandResult("Account token not available.")
+            }
+
+            val client = OkHttpClient()
+            val fingerprint = fetchFingerprint()
+            val superProps = getSuperProperties()
+            val query = if (disc != null) "$uname#$disc" else uname
+
+            // Step 1: Search for user ID
+            val searchReq = Request.Builder()
+                .url("https://discord.com/api/v9/users/search?query=$query")
+                .get()
+                .addHeader("Authorization", token)
+                .addHeader("User-Agent", "Discord-Android/191019;RNA")
+                .addHeader("X-Super-Properties", superProps)
+                .addHeader("X-Discord-Locale", "en-US")
+                .addHeader("Accept", "application/json")
+                .apply { if (fingerprint != null) addHeader("X-Fingerprint", fingerprint) }
+                .build()
+
+            val userId = try {
+                client.newCall(searchReq).execute().use { res ->
+                    if (!res.isSuccessful) {
+                        return@registerCommand CommandsAPI.CommandResult("Failed to search user: ${res.code}")
+                    }
+                    val body = res.body?.string() ?: return@registerCommand CommandsAPI.CommandResult("Empty search response")
+                    val json = JSONArray(body)
+                    if (json.length() == 0) return@registerCommand CommandsAPI.CommandResult("User not found")
+                    val user = json.getJSONObject(0)
+                    user.getString("id")
+                }
+            } catch (e: Exception) {
+                return@registerCommand CommandsAPI.CommandResult("Error searching user: ${e.message}")
+            }
+
+            // Add delay to avoid rate limiting
+            Thread.sleep(1000)
+
+            // Step 2: Send friend request via PUT
+            val putReq = Request.Builder()
+                .url("https://discord.com/api/v9/users/@me/relationships/$userId")
+                .put(RequestBody.create(null, ""))
+                .addHeader("Authorization", token)
+                .addHeader("User-Agent", "Discord-Android/191019;RNA")
+                .addHeader("X-Super-Properties", superProps)
+                .addHeader("X-Discord-Locale", "en-US")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Accept", "*/*")
+                .apply { if (fingerprint != null) addHeader("X-Fingerprint", fingerprint) }
+                .build()
+
+            try {
+                client.newCall(putReq).execute().use { res ->
+                    if (res.isSuccessful) {
+                        CommandsAPI.CommandResult("Friend request sent to $input")
+                    } else {
+                        CommandsAPI.CommandResult("Failed: ${res.code} ${res.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                CommandsAPI.CommandResult("Error: ${e.message}")
+            }
         }
 
         // Patch that adds an embed with message statistics to each message
